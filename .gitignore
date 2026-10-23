@@ -1,0 +1,12 @@
+node_modules/
+coverage/
+.env
+.env.*
+!.env.example
+uploads/*
+!uploads/.gitkeep
+tests/.uploads/
+*.log
+.DS_Store
+.idea/
+.vscode/
