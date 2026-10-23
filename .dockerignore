@@ -1,0 +1,12 @@
+node_modules
+coverage
+uploads
+tests
+.git
+.github
+.env
+.env.*
+!.env.example
+*.md
+Dockerfile
+docker-compose.yml
