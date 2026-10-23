@@ -1,0 +1,913 @@
+openapi: 3.0.3
+info:
+  title: TaskMaster API
+  version: 1.0.0
+  description: |
+    Collaborative task tracking & management REST API.
+
+    **Authentication** – call `POST /auth/login` (or `/auth/register`) and send the returned
+    `accessToken` as `Authorization: Bearer <token>`. Access tokens are short-lived (15 min);
+    obtain a new pair with `POST /auth/refresh`. Refresh tokens rotate on every use.
+
+    **Envelope** – successful responses are `{ "success": true, "data": ..., "meta"?: ... }`;
+    errors are `{ "success": false, "error": { "code", "message", "details"?, "requestId" } }`.
+
+    **Real-time** – connect a Socket.IO client to the server root with
+    `io(URL, { auth: { token: accessToken } })` to receive `notification:new`, `task:*`,
+    `comment:*`, `attachment:*` and `team:*` events.
+servers:
+  - url: /api/v1
+tags:
+  - name: Auth
+  - name: Users
+  - name: Teams
+  - name: Invitations
+  - name: Tasks
+  - name: Comments
+  - name: Attachments
+  - name: Notifications
+  - name: AI
+
+security:
+  - bearerAuth: []
+
+paths:
+  /auth/register:
+    post:
+      tags: [Auth]
+      summary: Create an account
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, email, password]
+              properties:
+                name: { type: string, minLength: 2, maxLength: 100, example: Asha Verma }
+                email: { type: string, format: email, example: asha@example.com }
+                password:
+                  type: string
+                  minLength: 8
+                  maxLength: 72
+                  description: Must contain upper-case, lower-case and a digit.
+                  example: Str0ngPassw0rd
+      responses:
+        '201': { $ref: '#/components/responses/AuthResult' }
+        '409': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/Error' }
+
+  /auth/login:
+    post:
+      tags: [Auth]
+      summary: Log in with email & password
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: { type: string, format: email }
+                password: { type: string }
+      responses:
+        '200': { $ref: '#/components/responses/AuthResult' }
+        '401': { $ref: '#/components/responses/Error' }
+
+  /auth/refresh:
+    post:
+      tags: [Auth]
+      summary: Rotate the refresh token and obtain a new access token
+      description: The refresh token is read from the body or from the `tm_refresh` httpOnly cookie.
+      security: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                refreshToken: { type: string }
+      responses:
+        '200':
+          description: New token pair
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean }
+                  data: { $ref: '#/components/schemas/Tokens' }
+        '401': { $ref: '#/components/responses/Error' }
+
+  /auth/logout:
+    post:
+      tags: [Auth]
+      summary: Log out the current session
+      description: Revokes the session; its access & refresh tokens stop working immediately and live sockets are disconnected.
+      responses:
+        '204': { description: Logged out }
+        '401': { $ref: '#/components/responses/Error' }
+
+  /auth/logout-all:
+    post:
+      tags: [Auth]
+      summary: Log out of every device
+      responses:
+        '204': { description: All sessions revoked }
+
+  /auth/sessions:
+    get:
+      tags: [Auth]
+      summary: List active sessions (devices)
+      responses:
+        '200':
+          {
+            description: Sessions,
+            content: { application/json: { schema: { $ref: '#/components/schemas/DataArray' } } },
+          }
+
+  /users/me:
+    get:
+      tags: [Users]
+      summary: Get my profile
+      responses:
+        '200': { $ref: '#/components/responses/UserResult' }
+    patch:
+      tags: [Users]
+      summary: Update my profile
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              minProperties: 1
+              properties:
+                name: { type: string, minLength: 2, maxLength: 100 }
+                bio: { type: string, maxLength: 500, nullable: true }
+                avatarUrl: { type: string, format: uri, nullable: true }
+      responses:
+        '200': { $ref: '#/components/responses/UserResult' }
+        '422': { $ref: '#/components/responses/Error' }
+
+  /users/me/password:
+    patch:
+      tags: [Users]
+      summary: Change my password
+      description: Other sessions are signed out; the current session stays valid.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [currentPassword, newPassword]
+              properties:
+                currentPassword: { type: string }
+                newPassword: { type: string }
+      responses:
+        '204': { description: Password changed }
+        '400': { $ref: '#/components/responses/Error' }
+
+  /users/{userId}:
+    get:
+      tags: [Users]
+      summary: Get a teammate's public profile
+      parameters: [{ $ref: '#/components/parameters/userId' }]
+      responses:
+        '200': { $ref: '#/components/responses/UserResult' }
+        '404': { $ref: '#/components/responses/Error' }
+
+  /teams:
+    post:
+      tags: [Teams]
+      summary: Create a team / project (caller becomes owner)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string, minLength: 2, maxLength: 100 }
+                description: { type: string, maxLength: 1000, nullable: true }
+      responses:
+        '201': { $ref: '#/components/responses/TeamResult' }
+    get:
+      tags: [Teams]
+      summary: List teams I belong to
+      parameters:
+        - $ref: '#/components/parameters/page'
+        - $ref: '#/components/parameters/limit'
+        - { name: search, in: query, schema: { type: string } }
+      responses:
+        '200':
+          {
+            description: Teams,
+            content: { application/json: { schema: { $ref: '#/components/schemas/Paginated' } } },
+          }
+
+  /teams/join:
+    post:
+      tags: [Teams]
+      summary: Join a team using its invite code
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [inviteCode]
+              properties:
+                inviteCode: { type: string, example: K7QW2M9XPA }
+      responses:
+        '200': { $ref: '#/components/responses/TeamResult' }
+        '404': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+
+  /teams/{teamId}:
+    parameters: [{ $ref: '#/components/parameters/teamId' }]
+    get:
+      tags: [Teams]
+      summary: Team details with members (invite code visible to owner/admins)
+      responses:
+        '200': { $ref: '#/components/responses/TeamResult' }
+        '404': { $ref: '#/components/responses/Error' }
+    patch:
+      tags: [Teams]
+      summary: Update team (owner/admin)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+                description: { type: string, nullable: true }
+      responses:
+        '200': { $ref: '#/components/responses/TeamResult' }
+        '403': { $ref: '#/components/responses/Error' }
+    delete:
+      tags: [Teams]
+      summary: Delete team and all its tasks (owner)
+      responses:
+        '204': { description: Deleted }
+        '403': { $ref: '#/components/responses/Error' }
+
+  /teams/{teamId}/members:
+    get:
+      tags: [Teams]
+      summary: List members
+      parameters: [{ $ref: '#/components/parameters/teamId' }]
+      responses:
+        '200':
+          {
+            description: Members,
+            content: { application/json: { schema: { $ref: '#/components/schemas/DataArray' } } },
+          }
+
+  /teams/{teamId}/members/{userId}:
+    parameters:
+      - $ref: '#/components/parameters/teamId'
+      - $ref: '#/components/parameters/userId'
+    patch:
+      tags: [Teams]
+      summary: Change a member's role (owner)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [role]
+              properties:
+                role: { type: string, enum: [admin, member] }
+      responses:
+        '200': { description: Updated member list }
+        '403': { $ref: '#/components/responses/Error' }
+    delete:
+      tags: [Teams]
+      summary: Remove a member (owner, or admin removing a member). Their tasks in the team are unassigned.
+      responses:
+        '204': { description: Removed }
+        '403': { $ref: '#/components/responses/Error' }
+
+  /teams/{teamId}/leave:
+    post:
+      tags: [Teams]
+      summary: Leave a team (not allowed for the owner)
+      parameters: [{ $ref: '#/components/parameters/teamId' }]
+      responses:
+        '204': { description: Left the team }
+
+  /teams/{teamId}/invite-code:
+    post:
+      tags: [Teams]
+      summary: Regenerate the team invite code (owner/admin)
+      parameters: [{ $ref: '#/components/parameters/teamId' }]
+      responses:
+        '200': { description: New code }
+
+  /teams/{teamId}/invitations:
+    parameters: [{ $ref: '#/components/parameters/teamId' }]
+    post:
+      tags: [Invitations]
+      summary: Invite someone by email (owner/admin; only the owner can invite admins)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties:
+                email: { type: string, format: email }
+                role: { type: string, enum: [admin, member], default: member }
+      responses:
+        '201': { description: Invitation created }
+        '409': { $ref: '#/components/responses/Error' }
+    get:
+      tags: [Invitations]
+      summary: List the team's invitations (owner/admin)
+      parameters:
+        - $ref: '#/components/parameters/page'
+        - $ref: '#/components/parameters/limit'
+        - {
+            name: status,
+            in: query,
+            schema: { type: string, enum: [pending, accepted, declined, revoked] },
+          }
+      responses:
+        '200':
+          {
+            description: Invitations,
+            content: { application/json: { schema: { $ref: '#/components/schemas/Paginated' } } },
+          }
+
+  /teams/{teamId}/invitations/{invitationId}:
+    delete:
+      tags: [Invitations]
+      summary: Revoke a pending invitation (owner/admin)
+      parameters:
+        - $ref: '#/components/parameters/teamId'
+        - $ref: '#/components/parameters/invitationId'
+      responses:
+        '200': { description: Revoked invitation }
+
+  /invitations:
+    get:
+      tags: [Invitations]
+      summary: My pending invitations
+      responses:
+        '200':
+          {
+            description: Invitations,
+            content: { application/json: { schema: { $ref: '#/components/schemas/DataArray' } } },
+          }
+
+  /invitations/{invitationId}/accept:
+    post:
+      tags: [Invitations]
+      summary: Accept an invitation and join the team
+      parameters: [{ $ref: '#/components/parameters/invitationId' }]
+      responses:
+        '200': { description: Joined }
+        '404': { $ref: '#/components/responses/Error' }
+
+  /invitations/{invitationId}/decline:
+    post:
+      tags: [Invitations]
+      summary: Decline an invitation
+      parameters: [{ $ref: '#/components/parameters/invitationId' }]
+      responses:
+        '200': { description: Declined }
+
+  /tasks:
+    post:
+      tags: [Tasks]
+      summary: Create a task (personal, or in a team I belong to)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TaskCreate' }
+      responses:
+        '201': { $ref: '#/components/responses/TaskResult' }
+        '422': { $ref: '#/components/responses/Error' }
+    get:
+      tags: [Tasks]
+      summary: List / filter / sort / search tasks visible to me
+      description: |
+        Visible tasks are my personal tasks plus every task in teams I belong to.
+        `search` uses a weighted full-text index over title, tags and description.
+      parameters:
+        - $ref: '#/components/parameters/page'
+        - $ref: '#/components/parameters/limit'
+        - {
+            name: status,
+            in: query,
+            description: 'Comma separated: open,in_progress,completed',
+            schema: { type: string, example: 'open,in_progress' },
+          }
+        - {
+            name: priority,
+            in: query,
+            description: 'Comma separated: low,medium,high,urgent',
+            schema: { type: string },
+          }
+        - {
+            name: tags,
+            in: query,
+            description: Comma separated; task must have all,
+            schema: { type: string },
+          }
+        - { name: team, in: query, schema: { type: string } }
+        - {
+            name: assignee,
+            in: query,
+            description: "'me', 'unassigned' or a user id",
+            schema: { type: string },
+          }
+        - { name: createdBy, in: query, description: "'me' or a user id", schema: { type: string } }
+        - { name: dueBefore, in: query, schema: { type: string, format: date-time } }
+        - { name: dueAfter, in: query, schema: { type: string, format: date-time } }
+        - { name: overdue, in: query, schema: { type: boolean } }
+        - { name: search, in: query, schema: { type: string } }
+        - name: sort
+          in: query
+          description: Prefix with '-' for descending. 'relevance' requires search.
+          schema:
+            type: string
+            enum:
+              [
+                relevance,
+                createdAt,
+                -createdAt,
+                updatedAt,
+                -updatedAt,
+                dueDate,
+                -dueDate,
+                priority,
+                -priority,
+                title,
+                -title,
+                status,
+                -status,
+              ]
+      responses:
+        '200':
+          {
+            description: Tasks,
+            content: { application/json: { schema: { $ref: '#/components/schemas/Paginated' } } },
+          }
+
+  /tasks/assigned-to-me:
+    get:
+      tags: [Tasks]
+      summary: Tasks assigned to me (accepts the same filters as GET /tasks)
+      parameters:
+        - $ref: '#/components/parameters/page'
+        - $ref: '#/components/parameters/limit'
+        - { name: status, in: query, schema: { type: string } }
+        - { name: sort, in: query, schema: { type: string } }
+      responses:
+        '200':
+          {
+            description: Tasks,
+            content: { application/json: { schema: { $ref: '#/components/schemas/Paginated' } } },
+          }
+
+  /tasks/stats:
+    get:
+      tags: [Tasks]
+      summary: Dashboard counters (open / in progress / completed / overdue / assigned to me)
+      parameters:
+        - { name: team, in: query, schema: { type: string } }
+      responses:
+        '200': { description: Counters }
+
+  /tasks/{taskId}:
+    parameters: [{ $ref: '#/components/parameters/taskId' }]
+    get:
+      tags: [Tasks]
+      summary: Task details (includes my permissions)
+      responses:
+        '200': { $ref: '#/components/responses/TaskResult' }
+        '404': { $ref: '#/components/responses/Error' }
+    patch:
+      tags: [Tasks]
+      summary: Update a task (creator, assignee or team owner/admin)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TaskUpdate' }
+      responses:
+        '200': { $ref: '#/components/responses/TaskResult' }
+        '403': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+    delete:
+      tags: [Tasks]
+      summary: Delete a task with its comments and attachments (creator or team owner/admin)
+      responses:
+        '204': { description: Deleted }
+
+  /tasks/{taskId}/status:
+    patch:
+      tags: [Tasks]
+      summary: Change status (e.g. mark as completed)
+      parameters: [{ $ref: '#/components/parameters/taskId' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status: { type: string, enum: [open, in_progress, completed] }
+      responses:
+        '200': { $ref: '#/components/responses/TaskResult' }
+
+  /tasks/{taskId}/assignee:
+    patch:
+      tags: [Tasks]
+      summary: Assign to a team member (null to unassign)
+      parameters: [{ $ref: '#/components/parameters/taskId' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [assignee]
+              properties:
+                assignee: { type: string, nullable: true }
+      responses:
+        '200': { $ref: '#/components/responses/TaskResult' }
+        '422': { $ref: '#/components/responses/Error' }
+
+  /tasks/{taskId}/comments:
+    parameters: [{ $ref: '#/components/parameters/taskId' }]
+    get:
+      tags: [Comments]
+      summary: List comments
+      parameters:
+        - $ref: '#/components/parameters/page'
+        - $ref: '#/components/parameters/limit'
+        - { name: order, in: query, schema: { type: string, enum: [asc, desc], default: desc } }
+      responses:
+        '200':
+          {
+            description: Comments,
+            content: { application/json: { schema: { $ref: '#/components/schemas/Paginated' } } },
+          }
+    post:
+      tags: [Comments]
+      summary: Add a comment
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [body]
+              properties:
+                body: { type: string, maxLength: 5000 }
+      responses:
+        '201': { description: Comment created }
+
+  /tasks/{taskId}/comments/{commentId}:
+    parameters:
+      - $ref: '#/components/parameters/taskId'
+      - { name: commentId, in: path, required: true, schema: { type: string } }
+    patch:
+      tags: [Comments]
+      summary: Edit my comment
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [body]
+              properties:
+                body: { type: string }
+      responses:
+        '200': { description: Updated }
+        '403': { $ref: '#/components/responses/Error' }
+    delete:
+      tags: [Comments]
+      summary: Delete a comment (author, task creator or team owner/admin)
+      responses:
+        '204': { description: Deleted }
+
+  /tasks/{taskId}/attachments:
+    parameters: [{ $ref: '#/components/parameters/taskId' }]
+    get:
+      tags: [Attachments]
+      summary: List attachments
+      responses:
+        '200':
+          {
+            description: Attachments,
+            content: { application/json: { schema: { $ref: '#/components/schemas/DataArray' } } },
+          }
+    post:
+      tags: [Attachments]
+      summary: Upload attachments (multipart field "files", max 5 x 10 MB)
+      description: Allowed types - images (png, jpg, gif, webp), pdf, txt, csv, md, json, zip, Office documents.
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                files:
+                  type: array
+                  items: { type: string, format: binary }
+      responses:
+        '201': { description: Uploaded }
+        '413': { $ref: '#/components/responses/Error' }
+        '415': { $ref: '#/components/responses/Error' }
+
+  /tasks/{taskId}/attachments/{attachmentId}/download:
+    get:
+      tags: [Attachments]
+      summary: Download an attachment
+      parameters:
+        - $ref: '#/components/parameters/taskId'
+        - { name: attachmentId, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: File stream
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+
+  /tasks/{taskId}/attachments/{attachmentId}:
+    delete:
+      tags: [Attachments]
+      summary: Delete an attachment (uploader, task creator or team owner/admin)
+      parameters:
+        - $ref: '#/components/parameters/taskId'
+        - { name: attachmentId, in: path, required: true, schema: { type: string } }
+      responses:
+        '204': { description: Deleted }
+
+  /notifications:
+    get:
+      tags: [Notifications]
+      summary: My notifications (meta.unreadCount included)
+      parameters:
+        - $ref: '#/components/parameters/page'
+        - $ref: '#/components/parameters/limit'
+        - { name: unread, in: query, schema: { type: boolean } }
+        - { name: type, in: query, schema: { type: string } }
+      responses:
+        '200':
+          {
+            description: Notifications,
+            content: { application/json: { schema: { $ref: '#/components/schemas/Paginated' } } },
+          }
+
+  /notifications/unread-count:
+    get:
+      tags: [Notifications]
+      summary: Unread counter
+      responses:
+        '200': { description: Count }
+
+  /notifications/read-all:
+    patch:
+      tags: [Notifications]
+      summary: Mark all as read
+      responses:
+        '200': { description: Number updated }
+
+  /notifications/{notificationId}/read:
+    patch:
+      tags: [Notifications]
+      summary: Mark one as read
+      parameters: [{ name: notificationId, in: path, required: true, schema: { type: string } }]
+      responses:
+        '200': { description: Updated notification }
+
+  /notifications/{notificationId}:
+    delete:
+      tags: [Notifications]
+      summary: Delete a notification
+      parameters: [{ name: notificationId, in: path, required: true, schema: { type: string } }]
+      responses:
+        '204': { description: Deleted }
+
+  /ai/task-description:
+    post:
+      tags: [AI]
+      summary: Generate a task description from a title and rough notes (Claude)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [title]
+              properties:
+                title: { type: string, example: Add password reset flow }
+                notes: { type: string, example: email link, expires in 1h, rate limit }
+                priority: { type: string, enum: [low, medium, high, urgent] }
+      responses:
+        '200':
+          description: Generated content
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean }
+                  data:
+                    type: object
+                    properties:
+                      description: { type: string }
+                      acceptanceCriteria: { type: array, items: { type: string } }
+                      suggestedPriority: { type: string }
+                      suggestedTags: { type: array, items: { type: string } }
+                      model: { type: string }
+        '503': { $ref: '#/components/responses/Error' }
+
+  /ai/tasks/{taskId}/summary:
+    post:
+      tags: [AI]
+      summary: Summarise a task and its discussion (Claude)
+      parameters: [{ $ref: '#/components/parameters/taskId' }]
+      responses:
+        '200': { description: Summary, key points, blockers and next steps }
+        '503': { $ref: '#/components/responses/Error' }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  parameters:
+    page: { name: page, in: query, schema: { type: integer, minimum: 1, default: 1 } }
+    limit:
+      { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 20 } }
+    userId: { name: userId, in: path, required: true, schema: { type: string } }
+    teamId: { name: teamId, in: path, required: true, schema: { type: string } }
+    taskId: { name: taskId, in: path, required: true, schema: { type: string } }
+    invitationId: { name: invitationId, in: path, required: true, schema: { type: string } }
+
+  schemas:
+    User:
+      type: object
+      properties:
+        id: { type: string }
+        name: { type: string }
+        email: { type: string }
+        bio: { type: string, nullable: true }
+        avatarUrl: { type: string, nullable: true }
+        createdAt: { type: string, format: date-time }
+    Tokens:
+      type: object
+      properties:
+        tokenType: { type: string, example: Bearer }
+        accessToken: { type: string }
+        accessTokenExpiresAt: { type: string, format: date-time }
+        refreshToken: { type: string }
+        refreshTokenExpiresAt: { type: string, format: date-time }
+    Task:
+      type: object
+      properties:
+        id: { type: string }
+        title: { type: string }
+        description: { type: string }
+        status: { type: string, enum: [open, in_progress, completed] }
+        priority: { type: string, enum: [low, medium, high, urgent] }
+        dueDate: { type: string, format: date-time, nullable: true }
+        tags: { type: array, items: { type: string } }
+        team: { type: object, nullable: true }
+        createdBy: { $ref: '#/components/schemas/User' }
+        assignee: { allOf: [{ $ref: '#/components/schemas/User' }], nullable: true }
+        completedAt: { type: string, format: date-time, nullable: true }
+        commentCount: { type: integer }
+        attachmentCount: { type: integer }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+    TaskCreate:
+      type: object
+      required: [title]
+      properties:
+        title: { type: string, maxLength: 200 }
+        description: { type: string, maxLength: 10000 }
+        status: { type: string, enum: [open, in_progress, completed] }
+        priority: { type: string, enum: [low, medium, high, urgent] }
+        dueDate: { type: string, format: date-time, nullable: true }
+        tags: { type: array, maxItems: 10, items: { type: string } }
+        team: { type: string, nullable: true, description: Omit for a personal task }
+        assignee: { type: string, nullable: true }
+    TaskUpdate:
+      type: object
+      minProperties: 1
+      properties:
+        title: { type: string }
+        description: { type: string }
+        status: { type: string, enum: [open, in_progress, completed] }
+        priority: { type: string, enum: [low, medium, high, urgent] }
+        dueDate: { type: string, format: date-time, nullable: true }
+        tags: { type: array, items: { type: string } }
+        assignee: { type: string, nullable: true }
+    PageMeta:
+      type: object
+      properties:
+        page: { type: integer }
+        limit: { type: integer }
+        total: { type: integer }
+        totalPages: { type: integer }
+        hasNextPage: { type: boolean }
+        hasPrevPage: { type: boolean }
+    Paginated:
+      type: object
+      properties:
+        success: { type: boolean }
+        data: { type: array, items: { type: object } }
+        meta: { $ref: '#/components/schemas/PageMeta' }
+    DataArray:
+      type: object
+      properties:
+        success: { type: boolean }
+        data: { type: array, items: { type: object } }
+    Error:
+      type: object
+      properties:
+        success: { type: boolean, example: false }
+        error:
+          type: object
+          properties:
+            code: { type: string, example: VALIDATION_ERROR }
+            message: { type: string }
+            details:
+              type: array
+              items:
+                type: object
+                properties:
+                  location: { type: string }
+                  field: { type: string }
+                  message: { type: string }
+            requestId: { type: string }
+
+  responses:
+    Error:
+      description: Error
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    AuthResult:
+      description: Authenticated user and tokens
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              success: { type: boolean }
+              data:
+                allOf:
+                  - $ref: '#/components/schemas/Tokens'
+                  - type: object
+                    properties:
+                      user: { $ref: '#/components/schemas/User' }
+    UserResult:
+      description: User
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              success: { type: boolean }
+              data: { $ref: '#/components/schemas/User' }
+    TeamResult:
+      description: Team
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              success: { type: boolean }
+              data: { type: object }
+    TaskResult:
+      description: Task
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              success: { type: boolean }
+              data: { $ref: '#/components/schemas/Task' }
